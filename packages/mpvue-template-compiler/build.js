@@ -4742,13 +4742,13 @@ function convertAst (node, options, util) {
         var isDefault = Array.isArray(n);
         var slotName = isDefault ? 'default' : n.attrsMap.slot;
         var slotId = moduleId + "-" + slotName + "-" + (mpcomid.replace(/\'/g, ''));
-        var node = isDefault ? { tag: 'slot', attrsMap: {}, children: n } : n;
+        var _node = isDefault ? { tag: 'slot', attrsMap: {}, children: n } : n;
 
-        node.tag = 'template';
-        node.attrsMap.name = slotId;
-        delete node.attrsMap.slot;
+        _node.tag = 'template';
+        _node.attrsMap.name = slotId;
+        delete _node.attrsMap.slot;
         // 缓存，会集中生成一个 slots 文件
-        slots[slotId] = { node: convertAst(node, options, util), name: slotName, slotId: slotId };
+        slots[slotId] = { node: convertAst(_node, options, util), name: slotName, slotId: slotId, depth: computeDepth(node, components) };
         wxmlAst.slots[slotName] = slotId;
       });
     // 清理当前组件下的节点信息，因为 slot 都被转移了
@@ -4794,6 +4794,20 @@ function wxmlAst (compiled, options, log) {
     wxast: wxast,
     deps: deps,
     slots: slots
+  }
+}
+
+// 计算当前slot嵌套组件的深度，因为是从父开始向上查找，所以从1开始，而且至少有1层
+function computeDepth (node, components, depth) {
+  if ( depth === void 0 ) depth = 1;
+
+  if (node.parent) {
+    if (component.isComponent(node.parent.tag, components)) {
+      depth++;
+    }
+    return computeDepth(node.parent, components, depth)
+  } else {
+    return depth
   }
 }
 
@@ -4877,11 +4891,82 @@ function compileToWxml (compiled, options) {
   // 生成 slots code
   Object.keys(slots).forEach(function (k) {
     var slot = slots[k];
-    slot.code = generate$2(slot.node, options);
+    var row = generate$2(slot.node, options) || '';
+    // console.log('row~~~~', row)
+    // slot中的表达式，即{{}}包裹的代码需要加上作用域
+    slot.code = row.split(splitExpressionReg).map(function (expression) {
+      if (isExpression(expression) && !/\$root/.test(expression)) {
+        var code = handleExpression(row, expression, slot.depth);
+        // console.log('expression~~~', expression, 'slot.depth: ', slot.depth)
+        // console.log('code~~~', code)
+        return code
+      } else {
+        return expression
+      }
+    }).join('');
+    delete slot.depth;
   });
 
   // TODO: 后期优化掉这种暴力全部 import，虽然对性能没啥大影响
   return { code: code, compiled: compiled, slots: slots, importCode: importCode }
+}
+
+var splitExpressionReg = /(\{\{.+?\}\})/;
+var splitStaticWordReg = /('.+?')|(".+?")/;
+var splitWordReg = /([\{\}\(\)\*\/\?\!\[\]\:\=\+\-\|\&\^\~`><,;%\s])/;
+
+function isForVar (code, s) {
+  // wx:for-index="index" wx:for-item="item"
+  return code.indexOf(("wx:for-index=\"" + (s.split('.')[0]) + "\"")) !== -1 || code.indexOf(("wx:for-item=\"" + (s.split('.')[0]) + "\"")) !== -1
+}
+
+function isVar (s) {
+  return /^[a-zA-Z_$].+/.test(s)
+}
+
+function isExpression (s) {
+  return /\{\{(.+?)\}\}/.test(s)
+}
+
+function isKeyWord (s) {
+  return ['null', 'undefined', 'false', 'true'].indexOf(s) >= 0
+}
+
+function isStatic$1 (s) {
+  return /(^'.*'$)|(^".*"$)/.test(s)
+}
+
+// 处理表达式
+function handleExpression (code, ex, depth) {
+  return ex.split(splitStaticWordReg).map(function (m) {
+    if (m && !isStatic$1(m)) {
+      // 非静态字段
+      return m.split(splitWordReg).map(function (s) {
+        if (s && !isKeyWord(s) && isVar(s) && !isForVar(code, s)) {
+          s = setScope(s, depth);
+        }
+        return s
+      }).join('')
+    } else {
+      return m
+    }
+  }).join('')
+}
+
+// 根据slot嵌套的深度设置其访问路径
+function setScope(key, depth) {
+  if (depth === 0) {
+    return key
+  } else if (depth === 1) {
+    return ("$root[$p]." + key)
+  } else {
+    var s = '$root[$p]';
+    for (var i = 1; i < depth; i++) {
+      s = '$root[' + s + '.$p]';
+    }
+    s += "." + key;
+    return s
+  }
 }
 
 /*  */
